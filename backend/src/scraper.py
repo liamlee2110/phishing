@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import os
@@ -120,21 +122,51 @@ class FacebookScraper:
 
         base_url = url.rstrip("/")
 
+        debug_dir = os.path.join(os.path.dirname(__file__), "..", "debug")
+        os.makedirs(debug_dir, exist_ok=True)
+
         # ── 1. Profile page: extract name, intro/bio, and posts ───────
         print(f"[Scraper] Navigating to: {base_url}")
         await self._page.goto(base_url, timeout=25000, wait_until="domcontentloaded")
         await asyncio.sleep(3)
+        await self._dismiss_popups()
 
-        debug_dir = os.path.join(os.path.dirname(__file__), "..", "debug")
-        os.makedirs(debug_dir, exist_ok=True)
         await self._page.screenshot(path=os.path.join(debug_dir, "page.png"), full_page=False)
 
         profile_name = await self._extract_profile_name()
+        print(f"[Scraper] Profile name: {profile_name}")
         intro_items = await self._extract_intro_sidebar()
 
-        for _ in range(7):
+        # Scroll to load posts
+        for _ in range(10):
             await self._page.evaluate("window.scrollBy(0, window.innerHeight)")
-            await asyncio.sleep(1)
+            await asyncio.sleep(1.2)
+
+        # Expand "See more" / "Xem thêm"
+        try:
+            see_more = self._page.locator(
+                'div[role="button"]:has-text("See more"), '
+                'div[role="button"]:has-text("Xem thêm")'
+            )
+            count = await see_more.count()
+            for i in range(min(count, 20)):
+                try:
+                    await see_more.nth(i).click(timeout=1500)
+                    await asyncio.sleep(0.3)
+                except Exception:
+                    continue
+            print(f"[Scraper] Expanded {min(count, 20)} 'See more' buttons")
+        except Exception:
+            pass
+
+        # Save debug HTML
+        try:
+            html = await self._page.content()
+            with open(os.path.join(debug_dir, "page.html"), "w", encoding="utf-8") as f:
+                f.write(html)
+            print(f"[Scraper] Debug HTML saved ({len(html)} chars)")
+        except Exception:
+            pass
 
         posts = await self._extract_posts()
 
@@ -142,7 +174,7 @@ class FacebookScraper:
         about_info = await self._scrape_about_page(base_url)
 
         # ── 3. Friends page: visible friend names ─────────────────────
-        friend_names = await self._scrape_friends_page(base_url)
+        friend_names = await self._scrape_friends_page(base_url, profile_name)
 
         # ── 4. Analysis ──────────────────────────────────────────────
         connections = self._extract_mentions(posts)
@@ -181,18 +213,65 @@ class FacebookScraper:
             "tone_analysis": tone,
         }
 
+    # ── Dismiss popups / overlays ──────────────────────────────────
+
+    async def _dismiss_popups(self):
+        """Close notification popups, cookie banners, login dialogs,
+        and any other overlays that block the profile content."""
+
+        # Press Escape to close any open overlay (notifications, messenger, etc.)
+        for _ in range(3):
+            await self._page.keyboard.press("Escape")
+            await asyncio.sleep(0.5)
+
+        # Click away from popups by clicking the main content area
+        try:
+            await self._page.click('div[role="main"]', timeout=2000)
+        except Exception:
+            pass
+
+        # Close common Facebook dialogs
+        close_selectors = [
+            'div[aria-label="Close"]',
+            'div[aria-label="Đóng"]',
+            'a[aria-label="Close"]',
+            'a[aria-label="Đóng"]',
+        ]
+        for selector in close_selectors:
+            try:
+                btn = self._page.locator(selector).first
+                if await btn.count() > 0 and await btn.is_visible(timeout=1000):
+                    await btn.click(timeout=1500)
+                    await asyncio.sleep(0.5)
+            except Exception:
+                continue
+
+        # Wait a moment for the page to settle
+        await asyncio.sleep(1)
+        print("[Scraper] Dismissed popups")
+
     # ── Profile name ─────────────────────────────────────────────────
 
     async def _extract_profile_name(self) -> str:
-        try:
-            h1 = self._page.locator("h1")
-            if await h1.count() > 0:
-                name = (await h1.first.inner_text(timeout=3000)).strip()
-                if name and len(name) < 80:
-                    print(f"[Scraper] Profile name: {name}")
-                    return name
-        except Exception:
-            pass
+        # Try to get profile name from the main content area (not popups/overlays)
+        selectors = [
+            'div[role="main"] h1',
+            'h1',
+        ]
+        skip_names = {
+            "thông báo", "notifications", "messenger", "facebook",
+            "watch", "marketplace", "groups", "gaming",
+        }
+        for selector in selectors:
+            try:
+                headings = self._page.locator(selector)
+                count = await headings.count()
+                for i in range(min(count, 5)):
+                    name = (await headings.nth(i).inner_text(timeout=2000)).strip()
+                    if name and len(name) < 80 and name.lower() not in skip_names:
+                        return name
+            except Exception:
+                continue
         return ""
 
     # ── Intro sidebar (the short bullet list on the profile page) ────
@@ -255,7 +334,7 @@ class FacebookScraper:
 
     # ── Friends page scraping ────────────────────────────────────────
 
-    async def _scrape_friends_page(self, base_url: str) -> list[str]:
+    async def _scrape_friends_page(self, base_url: str, profile_name: str = "") -> list[str]:
         names: list[str] = []
         try:
             friends_url = f"{base_url}/friends"
@@ -271,12 +350,19 @@ class FacebookScraper:
             for link in links:
                 try:
                     text = (await link.inner_text(timeout=1500)).strip()
+                    ui_noise = {
+                        "friends", "all friends", "mutual friends", "see all",
+                        "friend requests", "find friends", "suggestions",
+                        "lời mời kết bạn", "tìm bạn bè", "gợi ý",
+                        "bạn bè", "tất cả bạn bè", "bạn chung",
+                    }
                     if (
                         text
                         and 2 < len(text) < 50
                         and not text.isdigit()
-                        and text.lower() not in ("friends", "all friends", "mutual friends", "see all")
+                        and text.lower() not in ui_noise
                         and re.match(r"^[A-ZÀ-ÿ]", text)
+                        and text != profile_name
                     ):
                         names.append(text)
                 except Exception:
@@ -306,63 +392,184 @@ class FacebookScraper:
     )
 
     async def _extract_posts(self) -> list:
+        """Extract posts using data-ad-preview='message' which is where
+        Facebook actually renders post text (NOT inside div[role='article'])."""
+
+        js_code = """() => {
+            var results = [];
+            var debug = [];
+            var seenTexts = {};
+
+            var messageDivs = document.querySelectorAll(
+                'div[data-ad-preview="message"], div[data-ad-comet-preview="message"]'
+            );
+            debug.push('Found ' + messageDivs.length + ' data-ad-preview message divs');
+
+            var storyMsgDivs = document.querySelectorAll(
+                'div[data-ad-rendering-role="story_message"]'
+            );
+            debug.push('Found ' + storyMsgDivs.length + ' story_message divs');
+
+            var allMsgNodes = Array.from(messageDivs).concat(Array.from(storyMsgDivs));
+
+            for (var idx = 0; idx < allMsgNodes.length; idx++) {
+                var msgDiv = allMsgNodes[idx];
+                var postText = (msgDiv.innerText || '').trim();
+
+                if (!postText || postText.length < 5) {
+                    debug.push('Msg ' + idx + ': SKIP (too short: ' + postText.length + ')');
+                    continue;
+                }
+
+                var key = postText.substring(0, 200);
+                if (seenTexts[key]) {
+                    debug.push('Msg ' + idx + ': SKIP (duplicate)');
+                    continue;
+                }
+                seenTexts[key] = true;
+
+                var card = msgDiv;
+                for (var up = 0; up < 25; up++) {
+                    if (!card.parentElement) break;
+                    card = card.parentElement;
+                    if (card.querySelector('div[data-ad-rendering-role="profile_name"]')) {
+                        break;
+                    }
+                }
+
+                var author = '';
+                var profileNameDiv = card.querySelector('div[data-ad-rendering-role="profile_name"]');
+                if (profileNameDiv) {
+                    var authorEl = profileNameDiv.querySelector('a[role="link"] b span span');
+                    if (!authorEl) authorEl = profileNameDiv.querySelector('a[role="link"] strong');
+                    if (authorEl) {
+                        author = (authorEl.innerText || '').trim();
+                    }
+                    if (!author) {
+                        var h2 = profileNameDiv.querySelector('h2, h3');
+                        if (h2) author = (h2.innerText || '').trim();
+                    }
+                }
+
+                var date = 'Recent';
+                var ariaLinks = card.querySelectorAll('a[aria-label]');
+                for (var li = 0; li < ariaLinks.length; li++) {
+                    var label = (ariaLinks[li].getAttribute('aria-label') || '').trim();
+                    var dateRe = /january|february|march|april|may|june|july|august|september|october|november|december|yesterday|today|hours? ago|minutes? ago|days? ago|weeks? ago/i;
+                    if (dateRe.test(label) || /th.ng|thg/i.test(label)) {
+                        date = label;
+                        break;
+                    }
+                }
+
+                if (date === 'Recent') {
+                    var postLinks = card.querySelectorAll('a[href*="/posts/"], a[href*="/photo"], a[href*="story_fbid"], a[href*="pfbid"]');
+                    for (var pi = 0; pi < postLinks.length; pi++) {
+                        var pLabel = (postLinks[pi].getAttribute('aria-label') || '').trim();
+                        if (pLabel.length > 3 && pLabel.length < 80) {
+                            date = pLabel;
+                            break;
+                        }
+                    }
+                }
+
+                var cardText = card.innerText || '';
+                var likes = '0';
+                var comments = '0';
+                var shares = '0';
+
+                var likeM = cardText.match(/(\\d+[KkMm]?)\\s*(?:like|Love|Haha|Wow)/i);
+                if (likeM) likes = likeM[1];
+                var reactM = cardText.match(/(\\d+[KkMm]?)\\s*(?:reactions?)/i);
+                if (reactM) likes = reactM[1];
+
+                var commentM = cardText.match(/(\\d+[KkMm]?)\\s*(?:comments?)/i);
+                if (commentM) comments = commentM[1];
+
+                var shareM = cardText.match(/(\\d+[KkMm]?)\\s*(?:shares?)/i);
+                if (shareM) shares = shareM[1];
+
+                debug.push('Msg ' + idx + ': author=' + author + ' date=' + date + ' likes=' + likes + ' len=' + postText.length + ' text=' + postText.substring(0, 120));
+
+                results.push({
+                    text: postText,
+                    author: author,
+                    date: date,
+                    likes: likes,
+                    comments: comments,
+                    shares: shares
+                });
+            }
+
+            if (results.length === 0) {
+                debug.push('FALLBACK: searching div[dir=auto] in main content');
+                var mainContent = document.querySelector('div[role="main"]');
+                if (mainContent) {
+                    var autoDivs = mainContent.querySelectorAll('div[dir="auto"]');
+                    debug.push('Found ' + autoDivs.length + ' div[dir=auto] in main');
+                    for (var fi = 0; fi < autoDivs.length; fi++) {
+                        var div = autoDivs[fi];
+                        var t = (div.innerText || '').trim();
+                        if (t.length < 20) continue;
+
+                        var inForm = false;
+                        var p = div.parentElement;
+                        while (p) {
+                            if (p.tagName === 'FORM' || p.getAttribute('contenteditable')) {
+                                inForm = true;
+                                break;
+                            }
+                            p = p.parentElement;
+                        }
+                        if (inForm) continue;
+
+                        var fKey = t.substring(0, 200);
+                        if (seenTexts[fKey]) continue;
+                        seenTexts[fKey] = true;
+
+                        results.push({
+                            text: t,
+                            author: '',
+                            date: 'Recent',
+                            likes: '0',
+                            comments: '0',
+                            shares: '0'
+                        });
+                        debug.push('Fallback post ' + fi + ': ' + t.substring(0, 100));
+                        if (results.length >= 15) break;
+                    }
+                }
+            }
+
+            return { posts: results, debug: debug };
+        }"""
+
+        raw_posts = await self._page.evaluate(js_code)
+
+        debug_lines = raw_posts.get("debug", [])
+        for line in debug_lines:
+            print(f"[Scraper/JS] {line}")
+
         posts = []
-
-        # Strategy 1: div[role="article"] (standard Facebook post containers)
-        articles = await self._page.locator('div[role="article"]').all()
-        print(f"[Scraper] Found {len(articles)} article elements")
-
-        for i, article in enumerate(articles):
-            try:
-                raw_text = await article.inner_text(timeout=5000)
-            except Exception:
+        for i, raw in enumerate(raw_posts.get("posts", [])):
+            text = raw.get("text", "").strip()
+            if not text or len(text) < 5:
+                continue
+            if self._UI_NOISE.match(text):
                 continue
 
-            print(f"[Scraper] Article {i} raw text ({len(raw_text)} chars): {repr(raw_text[:300])}")
+            post = {
+                "text": text,
+                "author": raw.get("author", ""),
+                "date": raw.get("date", "Recent"),
+                "likes": self._parse_count(raw.get("likes", "0")),
+                "comments": self._parse_count(raw.get("comments", "0")),
+                "shares": self._parse_count(raw.get("shares", "0")),
+            }
+            posts.append(post)
+            print(f"[Scraper] Post {i}: author={post['author']!r} date={post['date']!r} ({len(text)} chars): {repr(text[:150])}")
 
-            cleaned = self._clean_article_text(raw_text)
-            print(f"[Scraper] Article {i} cleaned ({len(cleaned)} chars): {repr(cleaned[:200])}")
-
-            if cleaned and len(cleaned) > 20:
-                post = {"text": cleaned, "date": "Recent", "likes": 0, "comments": 0}
-
-                likes_match = re.search(r"(\d+[KkMm]?)\s*(?:likes?|Love|Haha|Wow)", raw_text)
-                if likes_match:
-                    post["likes"] = self._parse_count(likes_match.group(1))
-
-                comments_match = re.search(r"(\d+[KkMm]?)\s*comments?", raw_text, re.I)
-                if comments_match:
-                    post["comments"] = self._parse_count(comments_match.group(1))
-
-                posts.append(post)
-
-        # Strategy 2: If no articles found, try extracting from div[dir="auto"] (Facebook user text)
-        if not posts:
-            print("[Scraper] No posts from articles, trying div[dir='auto'] fallback...")
-            auto_divs = await self._page.locator('div[dir="auto"]').all()
-            print(f"[Scraper] Found {len(auto_divs)} div[dir='auto'] elements")
-
-            for div in auto_divs:
-                try:
-                    text = await div.inner_text(timeout=2000)
-                    text = text.strip()
-                except Exception:
-                    continue
-
-                if len(text) > 30 and not self._UI_NOISE.match(text):
-                    posts.append({"text": text, "date": "Recent", "likes": 0, "comments": 0})
-
-        # Strategy 3: Last resort — grab large text blocks from the full page
-        if not posts:
-            print("[Scraper] No posts from div[dir='auto'], trying full page text extraction...")
-            full_text = await self._page.inner_text("body")
-            paragraphs = full_text.split("\n")
-            for para in paragraphs:
-                para = para.strip()
-                if len(para) > 50 and not self._UI_NOISE.match(para):
-                    posts.append({"text": para, "date": "Recent", "likes": 0, "comments": 0})
-
-        # Deduplicate: remove posts that are substrings of longer posts
+        # Deduplicate: longer text wins
         posts.sort(key=lambda p: len(p["text"]), reverse=True)
         unique: list[dict] = []
         for p in posts:
@@ -370,25 +577,8 @@ class FacebookScraper:
             if not any(text in existing["text"] for existing in unique):
                 unique.append(p)
 
-        print(f"[Scraper] Extracted {len(unique)} unique posts total")
+        print(f"[Scraper] Final unique posts: {len(unique)}")
         return unique[:15]
-
-    def _clean_article_text(self, raw: str) -> str:
-        lines = raw.split("\n")
-        kept: list[str] = []
-        for line in lines:
-            line = line.strip()
-            if not line or len(line) < 4:
-                continue
-            if self._UI_NOISE.match(line):
-                continue
-            if re.match(
-                r"^(\d+[hms]|Yesterday|Just now|\d+ (hours?|minutes?|days?|weeks?) ago)$",
-                line, re.I,
-            ):
-                continue
-            kept.append(line)
-        return " ".join(kept)
 
     @staticmethod
     def _parse_count(s: str) -> int:
