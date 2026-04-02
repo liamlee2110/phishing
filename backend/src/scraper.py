@@ -116,37 +116,57 @@ class FacebookScraper:
     # ── Main scrape ──────────────────────────────────────────────────
 
     async def scrape_profile(self, url: str) -> dict:
-        """Navigate to a Facebook profile and extract posts, connections, events, and tone."""
+        """Navigate to a Facebook profile and extract everything useful for social engineering."""
 
-        print(f"[Scraper] Navigating to: {url}")
-        await self._page.goto(url, timeout=25000, wait_until="domcontentloaded")
+        base_url = url.rstrip("/")
+
+        # ── 1. Profile page: extract name, intro/bio, and posts ───────
+        print(f"[Scraper] Navigating to: {base_url}")
+        await self._page.goto(base_url, timeout=25000, wait_until="domcontentloaded")
         await asyncio.sleep(3)
 
-        # Save a debug screenshot so we can see what the page looks like
         debug_dir = os.path.join(os.path.dirname(__file__), "..", "debug")
         os.makedirs(debug_dir, exist_ok=True)
         await self._page.screenshot(path=os.path.join(debug_dir, "page.png"), full_page=False)
-        print(f"[Scraper] Debug screenshot saved to backend/debug/page.png")
 
-        for _ in range(3):
+        profile_name = await self._extract_profile_name()
+        intro_items = await self._extract_intro_sidebar()
+
+        for _ in range(7):
             await self._page.evaluate("window.scrollBy(0, window.innerHeight)")
             await asyncio.sleep(1)
 
         posts = await self._extract_posts()
 
-        if not posts:
+        # ── 2. About page: structured personal info ───────────────────
+        about_info = await self._scrape_about_page(base_url)
+
+        # ── 3. Friends page: visible friend names ─────────────────────
+        friend_names = await self._scrape_friends_page(base_url)
+
+        # ── 4. Analysis ──────────────────────────────────────────────
+        connections = self._extract_mentions(posts)
+        if friend_names:
+            existing = {c["name"] for c in connections}
+            for name in friend_names:
+                if name not in existing:
+                    connections.append({"name": name, "frequency": "friend-list"})
+
+        events = self._extract_events(posts)
+        tone = self._analyze_tone(posts)
+
+        if not posts and not about_info and not friend_names:
             raise ValueError(
-                f"Could not extract any posts from {url}. "
+                f"Could not extract any data from {url}. "
                 "The profile may be private, or cookies may be missing/expired. "
                 "Export your Facebook cookies to backend/cookies.json and try again."
             )
 
-        connections = self._extract_mentions(posts)
-        events = self._extract_events(posts)
-        tone = self._analyze_tone(posts)
-
         return {
             "profile_url": url,
+            "profile_name": profile_name,
+            "intro": intro_items,
+            "about": about_info,
             "recent_posts": [
                 {
                     "text": p["text"],
@@ -156,10 +176,118 @@ class FacebookScraper:
                 }
                 for p in posts
             ],
-            "connections": connections,
+            "connections": connections[:10],
             "events": events,
             "tone_analysis": tone,
         }
+
+    # ── Profile name ─────────────────────────────────────────────────
+
+    async def _extract_profile_name(self) -> str:
+        try:
+            h1 = self._page.locator("h1")
+            if await h1.count() > 0:
+                name = (await h1.first.inner_text(timeout=3000)).strip()
+                if name and len(name) < 80:
+                    print(f"[Scraper] Profile name: {name}")
+                    return name
+        except Exception:
+            pass
+        return ""
+
+    # ── Intro sidebar (the short bullet list on the profile page) ────
+
+    async def _extract_intro_sidebar(self) -> list[str]:
+        items: list[str] = []
+        try:
+            intro_section = self._page.locator('div:has(> span:text-is("Intro"))').first
+            if await intro_section.count() == 0:
+                intro_section = self._page.locator('text="Intro"').locator("..").locator("..")
+            spans = await intro_section.locator("li, div[dir='auto']").all()
+            for span in spans:
+                text = (await span.inner_text(timeout=2000)).strip()
+                if text and len(text) > 3 and text != "Intro":
+                    items.append(text)
+        except Exception:
+            pass
+        print(f"[Scraper] Intro items: {items}")
+        return items[:15]
+
+    # ── About page scraping ──────────────────────────────────────────
+
+    async def _scrape_about_page(self, base_url: str) -> dict:
+        about: dict = {}
+        sections = [
+            ("overview", "overview"),
+            ("work_and_education", "work_education"),
+            ("places", "places_lived"),
+            ("contact_and_basic_info", "contact_info"),
+            ("family_and_relationships", "relationships"),
+            ("details_about_you", "bio"),
+        ]
+
+        for slug, key in sections:
+            try:
+                url = f"{base_url}/about_overview" if slug == "overview" else f"{base_url}/about_{slug}"
+                print(f"[Scraper] Visiting: {url}")
+                await self._page.goto(url, timeout=15000, wait_until="domcontentloaded")
+                await asyncio.sleep(1.5)
+
+                main_content = self._page.locator('div[role="main"]')
+                if await main_content.count() == 0:
+                    continue
+
+                raw = await main_content.inner_text(timeout=5000)
+                lines = [
+                    l.strip() for l in raw.split("\n")
+                    if l.strip()
+                    and len(l.strip()) > 3
+                    and not self._UI_NOISE.match(l.strip())
+                    and l.strip() not in ("About", "Overview", "Edit", "Add")
+                ]
+                if lines:
+                    about[key] = lines[:20]
+            except Exception as e:
+                print(f"[Scraper] About/{slug} failed: {e}")
+
+        print(f"[Scraper] About sections scraped: {list(about.keys())}")
+        return about
+
+    # ── Friends page scraping ────────────────────────────────────────
+
+    async def _scrape_friends_page(self, base_url: str) -> list[str]:
+        names: list[str] = []
+        try:
+            friends_url = f"{base_url}/friends"
+            print(f"[Scraper] Visiting: {friends_url}")
+            await self._page.goto(friends_url, timeout=15000, wait_until="domcontentloaded")
+            await asyncio.sleep(2)
+
+            for _ in range(3):
+                await self._page.evaluate("window.scrollBy(0, window.innerHeight)")
+                await asyncio.sleep(0.8)
+
+            links = await self._page.locator('a[href*="/friends"] span, div[data-visualcompletion="ignore-dynamic"] a[role="link"] span').all()
+            for link in links:
+                try:
+                    text = (await link.inner_text(timeout=1500)).strip()
+                    if (
+                        text
+                        and 2 < len(text) < 50
+                        and not text.isdigit()
+                        and text.lower() not in ("friends", "all friends", "mutual friends", "see all")
+                        and re.match(r"^[A-ZÀ-ÿ]", text)
+                    ):
+                        names.append(text)
+                except Exception:
+                    continue
+
+            names = list(dict.fromkeys(names))
+            print(f"[Scraper] Friends found: {len(names)} — {names[:5]}")
+        except Exception as e:
+            print(f"[Scraper] Friends page failed: {e}")
+
+        return names[:20]
 
     # ── Post extraction ──────────────────────────────────────────────
 
@@ -243,7 +371,7 @@ class FacebookScraper:
                 unique.append(p)
 
         print(f"[Scraper] Extracted {len(unique)} unique posts total")
-        return unique[:10]
+        return unique[:15]
 
     def _clean_article_text(self, raw: str) -> str:
         lines = raw.split("\n")
