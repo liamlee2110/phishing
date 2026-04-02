@@ -1,0 +1,17 @@
+node_modules/
+.next/
+.turbo/
+dist/
+out/
+
+__pycache__/
+*.pyc
+venv/
+.venv/
+*.db
+
+.env
+cookies.json
+
+.DS_Store
+*.log

@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: phishing-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false          # Set manually in Render dashboard
+      - key: APPS_SCRIPT_URL
+        sync: false          # Set manually in Render dashboard
+      - key: FACEBOOK_COOKIES_FILE
+        value: ./cookies.json
