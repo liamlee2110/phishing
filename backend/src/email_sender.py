@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 APPS_SCRIPT_URL = os.getenv("APPS_SCRIPT_URL", "")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 
 def build_html_email(email_data: dict) -> str:
@@ -22,7 +23,7 @@ def build_html_email(email_data: dict) -> str:
 <body>
   {body_html}
   <p>
-    <a href="http://localhost:3000/scam">{cta_text}</a>
+    <a href="{FRONTEND_URL}/scam">{cta_text}</a>
   </p>
   {f'<p>{link_desc}</p>' if link_desc else ''}
   <br>
