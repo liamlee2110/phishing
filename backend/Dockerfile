@@ -57,5 +57,5 @@ COPY . .
 # Expose port
 EXPOSE 8000
 
-# Start server
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Start server with extended timeout for Playwright scraping
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-keep-alive", "120"]

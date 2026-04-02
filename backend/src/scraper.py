@@ -37,7 +37,19 @@ class FacebookScraper:
         self._cookies_json = cookies_json
 
         self._pw = await async_playwright().start()
-        self._browser = await self._pw.chromium.launch(headless=headless)
+        self._browser = await self._pw.chromium.launch(
+            headless=headless,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--single-process",
+                "--disable-setuid-sandbox",
+                "--disable-extensions",
+                "--disable-background-networking",
+                "--disable-software-rasterizer",
+            ],
+        )
         self._context = await self._browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
