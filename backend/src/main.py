@@ -28,6 +28,11 @@ app.add_middleware(
 
 generator = PhishingEmailGenerator()
 
+
+@app.get("/healthz")
+async def healthz():
+    return {"status": "ok"}
+
 DB_PATH = "votes.db"
 
 

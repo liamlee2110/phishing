@@ -108,7 +108,7 @@ class FacebookScraper:
 
         print(f"[Scraper] Navigating to: {url}")
         await self._page.goto(url, timeout=25000, wait_until="domcontentloaded")
-        await asyncio.sleep(5)
+        await asyncio.sleep(3)
 
         # Save a debug screenshot so we can see what the page looks like
         debug_dir = os.path.join(os.path.dirname(__file__), "..", "debug")
@@ -116,9 +116,9 @@ class FacebookScraper:
         await self._page.screenshot(path=os.path.join(debug_dir, "page.png"), full_page=False)
         print(f"[Scraper] Debug screenshot saved to backend/debug/page.png")
 
-        for _ in range(5):
+        for _ in range(3):
             await self._page.evaluate("window.scrollBy(0, window.innerHeight)")
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(1)
 
         posts = await self._extract_posts()
 
